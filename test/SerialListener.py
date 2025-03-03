@@ -4,8 +4,8 @@ import threading
 import time
 import Utils
 
-class ArduinoSerialListener:
 
+class ArduinoSerialListener:
     def __init__(self):
         self.port = None
         self.baudrate = 9600
@@ -13,6 +13,8 @@ class ArduinoSerialListener:
         self.is_connected = False
         self.is_listening = False
         self._stop_event = threading.Event()
+        self._command_queue = asyncio.Queue()  # Queue for commands
+        self._lock = asyncio.Lock()  # Lock for thread safety
 
     def connect(self, port=None):
         """Connect to the Arduino via serial port"""
@@ -73,42 +75,111 @@ class ArduinoSerialListener:
         self._stop_event.clear()
         print("Started listening for Arduino commands")
 
+        # Start a separate processor for BLE commands
+        self._ble_client = ble_client
+        processor_task = asyncio.create_task(self._process_commands())
+
         try:
             while not self._stop_event.is_set():
                 if self.serial.in_waiting > 0:
-                    line = self.serial.readline().decode("utf-8").strip()
+                    line = (
+                        self.serial.readline().decode("utf-8", errors="replace").strip()
+                    )
                     if line:
                         print(f"Arduino sent: {line}")
-                        # Process commands from Arduino
-                        if line.startswith("COLOR:"):
-                            try:
-                                # Format: COLOR:R,G,B
-                                rgb = line[6:].split(",")
-                                if len(rgb) == 3:
-                                    r, g, b = map(int, rgb)
-                                    await ble_client.writeColor(r, g, b)
-                            except Exception as e:
-                                print(f"Error processing color command: {e}")
-                        elif line.startswith("MODE:"):
-                            try:
-                                # Format: MODE:index
-                                mode_idx = int(line[5:])
-                                await ble_client.writeMode(mode_idx)
-                            except Exception as e:
-                                print(f"Error processing mode command: {e}")
-                        elif line == "TURN_ON":
-                            await ble_client.writePower("On")
-                        elif line == "TURN_OFF":
-                            await ble_client.writePower("Off")
+                        # Queue the command for processing
+                        await self._command_queue.put(line)
 
                 # Avoid tight loop
                 await asyncio.sleep(0.1)
 
         except Exception as e:
             print(f"Error in Arduino listener: {e}")
+        finally:
             self.is_listening = False
+            # Cancel the processor task when we're done
+            processor_task.cancel()
+            try:
+                await processor_task
+            except asyncio.CancelledError:
+                pass
 
         return True
+
+    async def _process_commands(self):
+        """Process commands from the queue"""
+        while self.is_listening:
+            try:
+                # Get a command from the queue
+                command = await self._command_queue.get()
+
+                # Process standard LED protocol commands
+                if command.startswith("COLOR:"):
+                    try:
+                        # Format: COLOR:R,G,B
+                        rgb = command[6:].split(",")
+                        if len(rgb) == 3:
+                            r, g, b = map(int, rgb)
+                            await self._ble_client.writeColor(r, g, b)
+                            # Send acknowledgment back to Arduino
+                            self.serial.write(f"ACK:COLOR:{r},{g},{b}\n".encode())
+                    except Exception as e:
+                        print(f"Error processing color command: {e}")
+
+                elif command.startswith("MODE:"):
+                    try:
+                        # Format: MODE:index
+                        mode_idx = int(command[5:])
+                        await self._ble_client.writeMode(mode_idx)
+                        # Send acknowledgment back to Arduino
+                        self.serial.write(f"ACK:MODE:{mode_idx}\n".encode())
+                    except Exception as e:
+                        print(f"Error processing mode command: {e}")
+
+                elif command == "POWER:ON":
+                    await self._ble_client.writePower("On")
+                    # Send acknowledgment back to Arduino
+                    self.serial.write("ACK:POWER:ON\n".encode())
+
+                elif command == "POWER:OFF":
+                    await self._ble_client.writePower("Off")
+                    # Send acknowledgment back to Arduino
+                    self.serial.write("ACK:POWER:OFF\n".encode())
+
+                # Alternative formats for flexibility
+                elif command.startswith("LED:"):
+                    # Process LED commands...
+                    parts = command[4:].split(":")
+                    if len(parts) >= 2:
+                        cmd = parts[0].upper()
+                        # Process various LED commands...
+                        if cmd == "ON":
+                            await self._ble_client.writePower("On")
+                            self.serial.write("ACK:LED:ON\n".encode())
+                        elif cmd == "OFF":
+                            await self._ble_client.writePower("Off")
+                            self.serial.write("ACK:LED:OFF\n".encode())
+                        # Add other LED commands here
+
+                # Simple on/off commands
+                elif command.upper() == "ON":
+                    await self._ble_client.writePower("On")
+                    self.serial.write("ACK:ON\n".encode())
+
+                elif command.upper() == "OFF":
+                    await self._ble_client.writePower("Off")
+                    self.serial.write("ACK:OFF\n".encode())
+
+                # Mark the task as done
+                self._command_queue.task_done()
+
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                print(f"Command processor error: {e}")
+
+            # Small delay between commands
+            await asyncio.sleep(0.01)
 
     async def start_listening_test_mode(self):
         """Test mode - just log commands without forwarding to BLE"""
@@ -130,7 +201,10 @@ class ArduinoSerialListener:
                     )
                     if line:
                         print(f"Arduino sent (TEST MODE): {line}")
-                        # Just log commands without forwarding
+
+                        # Process commands in test mode
+                        # [rest of your test mode code here]
+                        # Standard LED protocol format:
                         if line.startswith("COLOR:"):
                             try:
                                 # Format: COLOR:R,G,B
@@ -144,73 +218,21 @@ class ArduinoSerialListener:
                                     )
                             except Exception as e:
                                 print(f"Error processing color command: {e}")
-                        elif line.startswith("MODE:"):
-                            try:
-                                # Format: MODE:index
-                                mode_idx = int(line[5:])
-                                print(f"Would send MODE: {mode_idx}")
-                                # Send acknowledgment back to Arduino
-                                self.serial.write(f"ACK:MODE:{mode_idx}\n".encode())
-                            except Exception as e:
-                                print(f"Error processing mode command: {e}")
-                        elif line == "POWER:ON":
-                            print("Would send POWER ON")
-                            # Send acknowledgment back to Arduino
-                            self.serial.write("ACK:POWER:ON\n".encode())
-                        elif line == "POWER:OFF":
-                            print("Would send POWER OFF")
-                            # Send acknowledgment back to Arduino
-                            self.serial.write("ACK:POWER:OFF\n".encode())
+
+                        # [rest of your test mode command processing]
 
                 # Avoid tight loop
                 await asyncio.sleep(0.1)
 
         except Exception as e:
             print(f"Error in Arduino test listener: {e}")
+        finally:
             self.is_listening = False
 
         return True
 
     def stop_listening(self):
         """Stop the serial listener"""
+        self._stop_event.set()
         self.is_listening = False
-        Utils.printLog("Stopping Arduino serial listener")
-
-    async def process_command(self, command, client):
-        """Process commands received from Arduino"""
-        try:
-            if command == "POWER_ON" or command == "TURN_ON":
-                Utils.printLog("Arduino requested Power ON")
-                await client.writePower("On")
-
-            elif command == "POWER_OFF" or command == "TURN_OFF":
-                Utils.printLog("Arduino requested Power OFF")
-                await client.writePower("Off")
-
-            elif command.startswith("MODE_"):
-                try:
-                    mode_idx = int(command.split("_")[1])
-                    Utils.printLog(f"Arduino requested mode change to {mode_idx}")
-                    await client.writeMode(mode_idx)
-                except (ValueError, IndexError):
-                    Utils.printLog(f"Invalid mode command: {command}")
-
-            elif command.startswith("COLOR_"):
-                try:
-                    rgb = command.split("_")[1].split(",")
-                    r = int(rgb[0])
-                    g = int(rgb[1])
-                    b = int(rgb[2])
-                    Utils.printLog(
-                        f"Arduino requested color change to RGB({r},{g},{b})"
-                    )
-                    await client.writeColor(r, g, b)
-                except (ValueError, IndexError):
-                    Utils.printLog(f"Invalid color command: {command}")
-
-            # Log any unrecognized commands for debugging
-            else:
-                Utils.printLog(f"Received unrecognized command: {command}")
-
-        except Exception as e:
-            Utils.printLog(f"Error processing Arduino command: {e}")
+        print("Stopping Arduino serial listener")

@@ -507,15 +507,6 @@ class MainWindow(QMainWindow):
         """Toggle the Arduino serial listener on/off"""
         if self.arduino_enabled.isChecked():
             print("Starting Arduino listener")
-            # Check if we're connected to the BLE device
-            # if not hasattr(self, "current_client") or not self.current_client:
-            #     print("Cannot start Arduino listener: Not connected to BLE device")
-            #     Utils.printLog(
-            #         "Cannot start Arduino listener: Not connected to LED device"
-            #     )
-
-            #     self.arduino_enabled.setChecked(False)
-            #     return
 
             # Get selected port if any
             if self.arduino_port_combo.currentIndex() >= 0:
@@ -531,19 +522,37 @@ class MainWindow(QMainWindow):
 
                 # Check if we're connected to BLE client for LED control
                 if hasattr(self, "current_client") and self.current_client:
-                    loop = asyncio.get_running_loop()
-                    # Run the listener in a separate task
-                    self.arduino_task = loop.create_task(
-                        self.serial_listener.start_listening(self.current_client)
-                    )
-                    print("Arduino listener started with BLE forwarding")
+                    try:
+                        # Run the listener in a separate task with proper error handling
+                        loop = asyncio.get_running_loop()
+                        self.arduino_task = asyncio.create_task(
+                            self.serial_listener.start_listening(self.current_client)
+                        )
+                        # Add error handling to the task
+                        self.arduino_task.add_done_callback(
+                            self.handle_arduino_task_result
+                        )
+                        print("Arduino listener started with BLE forwarding")
+                    except Exception as e:
+                        print(f"Error starting Arduino listener: {e}")
+                        self.arduino_enabled.setChecked(False)
                 else:
                     # Run in test mode without BLE forwarding
-                    loop = asyncio.get_running_loop()
-                    self.arduino_task = loop.create_task(
-                        self.serial_listener.start_listening_test_mode()
-                    )
-                    print("Arduino listener started in test mode (no BLE forwarding)")
+                    try:
+                        loop = asyncio.get_running_loop()
+                        self.arduino_task = asyncio.create_task(
+                            self.serial_listener.start_listening_test_mode()
+                        )
+                        # Add error handling to the task
+                        self.arduino_task.add_done_callback(
+                            self.handle_arduino_task_result
+                        )
+                        print(
+                            "Arduino listener started in test mode (no BLE forwarding)"
+                        )
+                    except Exception as e:
+                        print(f"Error starting Arduino test listener: {e}")
+                        self.arduino_enabled.setChecked(False)
             else:
                 self.arduino_enabled.setChecked(False)
                 Utils.printLog(
@@ -558,6 +567,19 @@ class MainWindow(QMainWindow):
             self.update_arduino_status(False)
             if hasattr(self, "arduino_task") and self.arduino_task:
                 self.arduino_task.cancel()
+
+    def handle_arduino_task_result(self, task):
+        """Handle the result of the Arduino listener task"""
+        try:
+            task.result()  # This will raise any exception that occurred
+        except asyncio.CancelledError:
+            print("Arduino task was cancelled")
+        except Exception as e:
+            print(f"Arduino task failed with error: {e}")
+            # Update UI to show disconnected state
+            self.arduino_enabled.setChecked(False)
+            self.update_arduino_status(False)
+
 
 def main():
     try:
