@@ -19,7 +19,7 @@ import Utils
 import matplotlib.image as img
 import serial
 import time
-import SerialListener
+from SerialListener import ArduinoSerialListener
 
 try:
     from ctypes import windll
@@ -210,7 +210,7 @@ class MainWindow(QMainWindow):
         self.arduino_enabled.stateChanged.connect(self.toggle_arduino_listener)
 
         # Create the serial listener
-        self.serial_listener = SerialListener.ArduinoSerialListener()
+        self.serial_listener = ArduinoSerialListener()
 
     def setElemetsActiveStatus(self, status):
         self.micDevices_combobox.setEnabled(status)
