@@ -122,7 +122,7 @@ class MainWindow(QMainWindow):
         base_path = ""
         try:
             # PyInstaller creates a temp folder and stores path in _MEIPASS
-            base_path = sys._MEIPASS
+            base_path = getattr(sys, "_MEIPASS", os.path.abspath("."))
         except Exception:
             base_path = os.path.abspath(".")
 
@@ -508,14 +508,14 @@ class MainWindow(QMainWindow):
         if self.arduino_enabled.isChecked():
             print("Starting Arduino listener")
             # Check if we're connected to the BLE device
-            if not hasattr(self, "current_client") or not self.current_client:
-                print("Cannot start Arduino listener: Not connected to BLE device")
-                Utils.printLog(
-                    "Cannot start Arduino listener: Not connected to LED device"
-                )
+            # if not hasattr(self, "current_client") or not self.current_client:
+            #     print("Cannot start Arduino listener: Not connected to BLE device")
+            #     Utils.printLog(
+            #         "Cannot start Arduino listener: Not connected to LED device"
+            #     )
 
-                self.arduino_enabled.setChecked(False)
-                return
+            #     self.arduino_enabled.setChecked(False)
+            #     return
 
             # Get selected port if any
             if self.arduino_port_combo.currentIndex() >= 0:
@@ -526,15 +526,24 @@ class MainWindow(QMainWindow):
 
             print(f"Connecting to Arduino on port {self.serial_listener.port}")
             # Try to connect
-            connect = await self.connect_arduino()
-            if connect:
+            if self.serial_listener.connect():
                 self.update_arduino_status(True)
-                loop = asyncio.get_running_loop()
-                # Run the listener in a separate task
-                self.arduino_task = loop.create_task(
-                    self.serial_listener.start_listening(self.current_client)
-                )
-                print("Arduino listener started")
+
+                # Check if we're connected to BLE client for LED control
+                if hasattr(self, "current_client") and self.current_client:
+                    loop = asyncio.get_running_loop()
+                    # Run the listener in a separate task
+                    self.arduino_task = loop.create_task(
+                        self.serial_listener.start_listening(self.current_client)
+                    )
+                    print("Arduino listener started with BLE forwarding")
+                else:
+                    # Run in test mode without BLE forwarding
+                    loop = asyncio.get_running_loop()
+                    self.arduino_task = loop.create_task(
+                        self.serial_listener.start_listening_test_mode()
+                    )
+                    print("Arduino listener started in test mode (no BLE forwarding)")
             else:
                 self.arduino_enabled.setChecked(False)
                 Utils.printLog(

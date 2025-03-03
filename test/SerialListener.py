@@ -1,4 +1,4 @@
-import serial
+import serial as pyserial  # Rename the import to avoid namespace conflicts
 import asyncio
 import threading
 import time
@@ -32,10 +32,11 @@ class ArduinoSerialListener:
 
         try:
             # Close previous connection if exists
-            if self.serial and self.serial.is_open:
+            if self.serial and hasattr(self.serial, "is_open") and self.serial.is_open:
                 self.serial.close()
 
-            self.serial = serial.Serial(self.port, self.baudrate, timeout=1)
+            # Use pyserial instead of serial to avoid namespace conflict
+            self.serial = pyserial.Serial(self.port, self.baudrate, timeout=1)
             self.is_connected = True
             print(f"Connected to Arduino on {self.port}")
 
@@ -105,6 +106,67 @@ class ArduinoSerialListener:
 
         except Exception as e:
             print(f"Error in Arduino listener: {e}")
+            self.is_listening = False
+
+        return True
+
+    async def start_listening_test_mode(self):
+        """Test mode - just log commands without forwarding to BLE"""
+        if not self.is_connected or not hasattr(self, "serial") or not self.serial:
+            print("Cannot start listening: Not connected to Arduino")
+            return False
+
+        self.is_listening = True
+        self._stop_event.clear()
+        print(
+            "Started listening for Arduino commands in TEST MODE (commands will be logged only)"
+        )
+
+        try:
+            while not self._stop_event.is_set():
+                if self.serial.in_waiting > 0:
+                    line = (
+                        self.serial.readline().decode("utf-8", errors="replace").strip()
+                    )
+                    if line:
+                        print(f"Arduino sent (TEST MODE): {line}")
+                        # Just log commands without forwarding
+                        if line.startswith("COLOR:"):
+                            try:
+                                # Format: COLOR:R,G,B
+                                rgb = line[6:].split(",")
+                                if len(rgb) == 3:
+                                    r, g, b = map(int, rgb)
+                                    print(f"Would send COLOR: R={r}, G={g}, B={b}")
+                                    # Send acknowledgment back to Arduino
+                                    self.serial.write(
+                                        f"ACK:COLOR:{r},{g},{b}\n".encode()
+                                    )
+                            except Exception as e:
+                                print(f"Error processing color command: {e}")
+                        elif line.startswith("MODE:"):
+                            try:
+                                # Format: MODE:index
+                                mode_idx = int(line[5:])
+                                print(f"Would send MODE: {mode_idx}")
+                                # Send acknowledgment back to Arduino
+                                self.serial.write(f"ACK:MODE:{mode_idx}\n".encode())
+                            except Exception as e:
+                                print(f"Error processing mode command: {e}")
+                        elif line == "POWER:ON":
+                            print("Would send POWER ON")
+                            # Send acknowledgment back to Arduino
+                            self.serial.write("ACK:POWER:ON\n".encode())
+                        elif line == "POWER:OFF":
+                            print("Would send POWER OFF")
+                            # Send acknowledgment back to Arduino
+                            self.serial.write("ACK:POWER:OFF\n".encode())
+
+                # Avoid tight loop
+                await asyncio.sleep(0.1)
+
+        except Exception as e:
+            print(f"Error in Arduino test listener: {e}")
             self.is_listening = False
 
         return True
