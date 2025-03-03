@@ -146,29 +146,58 @@ class MainWindow(QMainWindow):
     @qasync.asyncSlot()
     async def handle_connect(self):
         """Connect to the selected BLE device"""
-        # Get device from address field or dropdown
-        if self.device_address.text() != "":
-            device = await BLEClass.BleakScanner.find_device_by_address(
-                self.device_address.text()
-            )
-        else:
-            device = self.devices_combobox.currentData()
+        try:
+            # Get device from address field or dropdown
+            if self.device_address.text() != "":
+                device = await BLEClass.BleakScanner.find_device_by_address(
+                    self.device_address.text()
+                )
+            else:
+                device = self.devices_combobox.currentData()
 
-        # Connect if we have a valid device
-        if isinstance(device, BLEClass.BLEDevice):
+            # Connect if we have a valid device
+            if isinstance(device, BLEClass.BLEDevice):
+                # Disconnect existing connection if any
+                if Utils.client is not None:
+                    await Utils.client.stop()
+                    Utils.client = None
+
+                # Temporarily update UI to show connecting status
+                self.connection_status.setText("Connecting...")
+                self.connection_status.setStyleSheet("QLabel {color: orange;}")
+                QApplication.processEvents()  # Force UI update
+
+                # Create and start the new connection
+                Utils.client = BLEClass.QBleakClient(device)
+
+                # Start connection with proper service discovery
+                success = await Utils.client.start()
+
+                if success:
+                    # Update UI on successful connection
+                    self.connection_status.setText("Connected")
+                    self.connection_status.setStyleSheet("QLabel {color: green;}")
+                    self.setControlsEnabled(True)
+                    self.connect_button.setText("Disconnect")
+                    self.connect_button.clicked.disconnect()
+                    self.connect_button.clicked.connect(self.handle_disconnect)
+                    print(f"Successfully connected to {device.name}")
+                else:
+                    # Update UI on connection failure
+                    self.connection_status.setText("Connection Failed")
+                    self.connection_status.setStyleSheet("QLabel {color: red;}")
+                    Utils.client = None
+                    print(f"Failed to connect to {device.name}")
+            else:
+                print("No valid device selected")
+        except Exception as e:
+            self.connection_status.setText("Error")
+            self.connection_status.setStyleSheet("QLabel {color: red;}")
+            print(f"Connection error: {e}")
+            # Clean up in case of error
             if Utils.client is not None:
                 await Utils.client.stop()
-
-            Utils.client = BLEClass.QBleakClient(device)
-            await Utils.client.start()
-
-            # Update UI
-            self.connection_status.setText("Connected")
-            self.connection_status.setStyleSheet("QLabel {color: green;}")
-            self.setControlsEnabled(True)
-            self.connect_button.setText("Disconnect")
-            self.connect_button.clicked.disconnect()
-            self.connect_button.clicked.connect(self.handle_disconnect)
+                Utils.client = None
 
     @qasync.asyncSlot()
     async def handle_disconnect(self):
