@@ -1,24 +1,15 @@
 from bleak import BleakScanner, BleakClient
 import asyncio
 import sys
-sys.coinit_flags = 0    # 0 means MTA
-import pyaudio
+
+sys.coinit_flags = 0  # 0 means MTA
 import qasync
-import numpy as np
-import scipy.cluster
-from PIL import ImageGrab
 from PyQt5.QtGui import *
-from turtle import color
-from dataclasses import dataclass
-from functools import cached_property
 from PyQt5.QtCore import *
 from PyQt5.QtWidgets import *
-import ExternalAudio
 import BLEClass
 import Utils
-import matplotlib.image as img
-import serial
-import time
+import os
 from SerialListener import ArduinoSerialListener
 
 try:
@@ -29,421 +20,184 @@ except ImportError:
 
 class MainWindow(QMainWindow):
     def closeEvent(self, event):
-        if self.device_address.text() != "":
-            device = BLEClass.BleakScanner.find_device_by_address(self.device_address.text())
-        else:
-            device = self.devices_combobox.currentData()        
-
-        if isinstance(device, BLEClass.BLEDevice):
-            self.build_client(device)
-            self.connect_button.disconnect()
-            self.connect_button.clicked.connect(self.destroy_client)
-            self.connect_button.setText("Disconnect")
-
-        # Make sure to clean up the Arduino listener when closing
+        # Clean up Arduino listener when closing
         if hasattr(self, "serial_listener"):
             self.serial_listener.stop_listening()
             self.serial_listener.disconnect()
             if hasattr(self, "arduino_task") and self.arduino_task:
                 self.arduino_task.cancel()
 
+        # Clean up BLE connection
+        if Utils.client is not None:
+            loop = asyncio.get_event_loop()
+            loop.create_task(Utils.client.stop())
+
     def __init__(self):
-        global isModeUsed, idx
         super().__init__()
-        # Increase window height to fit everything
-        self.setFixedSize(400, 450)  # Increased height to 450
-        isModeUsed = False
-        idx = -1
-        self.setWindowTitle("HappyLigthing-py")
-        self.setWindowIcon(QIcon('HappyLighting-py_icon.png'))
+        self.setFixedSize(400, 300)  # Reduced height for simpler UI
+        self.setWindowTitle("LED Arduino Control")
 
-        self.modeList = QListWidget(self)
-        self.modeList.setGeometry(210, 110, 180, 180)
-        self.modeList.itemDoubleClicked.connect(self.selectMode)
-
-        self.horizontalSlider = QSlider(self)
-        self.horizontalSlider.setObjectName(u"horizontalSlider")
-        self.horizontalSlider.setGeometry(QRect(250, 80, 131, 22))
-        self.horizontalSlider.setMinimum(1)
-        self.horizontalSlider.setMaximum(10)
-        self.horizontalSlider.setOrientation(Qt.Horizontal)
-        self.horizontalSlider.valueChanged.connect(self.changeSpeed)
-
-        self.deviceMic = QRadioButton(self)
-        self.deviceMic.setText("Device Mic")
-        self.deviceMic.setChecked(True)
-        self.deviceMic.setGeometry(QRect(100, 170, 91, 20))
-
-        self.micDevices_combobox = QComboBox(self)
-        self.micDevices_combobox.setGeometry(QRect(10, 210, 191, 22))
-
-        self.localMic = QRadioButton(self)
-        self.localMic.setText("Local Mic")
-        self.localMic.setChecked(False)
-        self.localMic.setGeometry(QRect(10, 170, 91, 20))
-
-        self.startCapture = QCheckBox(self)
-        self.startCapture.setText("Start Capture")
-        self.startCapture.setCheckState(Qt.Unchecked)
-        self.startCapture.setGeometry(QRect(290, 60, 101, 20))
-
-        self.scan_button = QPushButton(self)
-        self.scan_button.setText("Scan")
+        # Basic UI layout - scanning and connection
+        self.scan_button = QPushButton("Scan", self)
         self.scan_button.setGeometry(QRect(10, 10, 75, 23))
-
-        self.powerOn_button = QPushButton(self)
-        self.powerOn_button.setText("Power On")
-        self.powerOn_button.setGeometry(QRect(10, 65, 75, 23))
-        self.powerOn_button.clicked.connect(self.changePowerToOn)
-
-        self.powerOff_button = QPushButton(self)
-        self.powerOff_button.setText("Power Off")
-        self.powerOff_button.setGeometry(QRect(85, 65, 75, 23))
-        self.powerOff_button.clicked.connect(self.changePowerToOff)
-
-        self.connect_button = QPushButton(self)
-        self.connect_button.setText("Connect")
-        self.connect_button.setGeometry(QRect(10, 40, 75, 23))
+        self.scan_button.clicked.connect(self.handle_scan)
 
         self.devices_combobox = QComboBox(self)
-        self.devices_combobox.setGeometry(QRect(90, 10, 121, 22))
-        # Label Create
-        self.label = QLabel(self) 
-        self.label.setGeometry(QRect(220, 11, 20, 20)) 
-        # self.label.setMinimumSize(QSize(100, 100))
-        # self.label.setMaximumSize(QSize(300, 300))
-        self.label.setObjectName("lb1") 
-        self.label.setScaledContents(True)
+        self.devices_combobox.setGeometry(QRect(90, 10, 200, 22))
 
-        import os
-        self.movie = None
-        # Loading the GIF
-        """ Get absolute path to resource, works for dev and for PyInstaller """
-        base_path = ""
-        try:
-            # PyInstaller creates a temp folder and stores path in _MEIPASS
-            base_path = getattr(sys, "_MEIPASS", os.path.abspath("."))
-        except Exception:
-            base_path = os.path.abspath(".")
-
-        self.movie = QMovie(os.path.join(base_path, "Flower.gif"))
-
-        # self.movie = QMovie(resource_path("Flower.gif"))
-        self.label.setMovie(self.movie) 
-        self.label.hide()
+        self.connect_button = QPushButton("Connect", self)
+        self.connect_button.setGeometry(QRect(10, 40, 75, 23))
+        self.connect_button.clicked.connect(self.handle_connect)
 
         self.device_address = QLineEdit(self)
-        self.device_address.setGeometry(QRect(160, 40, 121, 22))
+        self.device_address.setGeometry(QRect(160, 40, 130, 22))
 
-        self.label1 = QLabel(self)
-        self.label1.setGeometry(QRect(90, 40, 71, 20))    
-        self.label1.setText("Disconnected")
-        self.label1.setStyleSheet("QLabel {color: red; }");
+        self.connection_status = QLabel("Disconnected", self)
+        self.connection_status.setGeometry(QRect(90, 40, 71, 20))
+        self.connection_status.setStyleSheet("QLabel {color: red; }")
 
-        self.label2 = QLabel(self)
-        self.label2.setGeometry(QRect(10, 190, 71, 20))
-        self.label2.setText("Input Devices")
-        # self.label2.setStyleSheet("QLabel {color: red; }");
+        # Progress indicator for scanning
+        self.scan_progress = QLabel(self)
+        self.scan_progress.setGeometry(QRect(300, 10, 20, 20))
+        self.scan_progress.setScaledContents(True)
+        self.movie = QMovie(os.path.join(os.path.abspath("."), "Flower.gif"))
+        self.scan_progress.setMovie(self.movie)
+        self.scan_progress.hide()
 
-        self.send_button = QPushButton(self)
-        self.send_button.setText("Color")
-        self.send_button.setGeometry(QRect(310, 10, 80, 23))
+        # Power buttons
+        self.power_group = QGroupBox("LED Control", self)
+        self.power_group.setGeometry(QRect(10, 80, 380, 80))
 
-        self.bass_button = QCheckBox(self)
-        self.bass_button.setChecked(True)
-        self.bass_button.setText("Bass")
-        self.bass_button.setGeometry(QRect(10, 230, 51, 23))
+        self.powerOn_button = QPushButton("Power On", self.power_group)
+        self.powerOn_button.setGeometry(QRect(20, 30, 150, 30))
+        self.powerOn_button.clicked.connect(self.handle_powerOn)
 
-        self.middle_button = QCheckBox(self)
-        self.middle_button.setChecked(True)
-        self.middle_button.setText("Middle")
-        self.middle_button.setGeometry(QRect(80, 230, 51, 23))
+        self.powerOff_button = QPushButton("Power Off", self.power_group)
+        self.powerOff_button.setGeometry(QRect(210, 30, 150, 30))
+        self.powerOff_button.clicked.connect(self.handle_powerOff)
 
-        self.high_button = QCheckBox(self)
-        self.high_button.setChecked(True)
-        self.high_button.setText("High")
-        self.high_button.setGeometry(QRect(150, 230, 51, 23))
-
-        self.scan_button.clicked.connect(self.handle_scan)
-        self.connect_button.clicked.connect(self.handle_connect)
-        self.send_button.clicked.connect(self.handle_send)
-        self.modeList.itemDoubleClicked.connect(self.selectMode)
-        self.deviceMic.toggled.connect(self.handle_musicmode)
-        self.localMic.toggled.connect(self.handle_musicmode)
-        self.startCapture.stateChanged.connect(self.handle_startcapture)
-        self.micDevices_combobox.currentIndexChanged.connect(self.updateMicDevice)
-        self.bass_button.clicked.connect(lambda: self.handle_enabledisable("B"))
-        self.middle_button.clicked.connect(lambda: self.handle_enabledisable("M"))
-        self.high_button.clicked.connect(lambda: self.handle_enabledisable("H"))
-
-        self.modeList.addItem("Pulsating rainbow")
-        self.modeList.addItem("Pulsating red")
-        self.modeList.addItem("Pulsating green")
-        self.modeList.addItem("Pulsating blue")
-        self.modeList.addItem("Pulsating yellow")
-        self.modeList.addItem("Pulsating cyan")
-        self.modeList.addItem("Pulsating purple")
-        self.modeList.addItem("Pulsating white")
-        self.modeList.addItem("Pulsating red/green")
-        self.modeList.addItem("Pulsating red/blue")
-        self.modeList.addItem("Pulsating green/blue")
-        self.modeList.addItem("Rainbow strobe")
-        self.modeList.addItem("Red strobe")
-        self.modeList.addItem("Green strobe")
-        self.modeList.addItem("Blue strobe")
-        self.modeList.addItem("Yellow strobe")
-        self.modeList.addItem("Cyan strobe")
-        self.modeList.addItem("Purple strobe")
-        self.modeList.addItem("white strobe")
-        self.modeList.addItem("Rainbow jumping change")
-        self.modeList.addItem("Pulsating RGB")
-        self.modeList.addItem("RGB jumping change")
-        self.modeList.addItem("Music Mode")
-
-        self.setElemetsActiveStatus(False)
-
-        # Add Arduino listener components
-        # Update Arduino control group - position it better
+        # Arduino control section
         self.arduino_group = QGroupBox("Arduino Serial Control", self)
-        self.arduino_group.setGeometry(
-            QRect(210, 300, 180, 130)
-        )  # Moved to the right side
+        self.arduino_group.setGeometry(QRect(10, 170, 380, 120))
 
-        self.arduino_enabled = QCheckBox("Enable Arduino", self.arduino_group)
-        self.arduino_enabled.setGeometry(QRect(10, 20, 120, 20))
+        self.arduino_enabled = QCheckBox("Enable Arduino Control", self.arduino_group)
+        self.arduino_enabled.setGeometry(QRect(20, 30, 160, 20))
         self.arduino_enabled.stateChanged.connect(self.toggle_arduino_listener)
 
-        # Add port selection dropdown
+        # Port selection
         self.arduino_port_label = QLabel("Port:", self.arduino_group)
-        self.arduino_port_label.setGeometry(QRect(10, 45, 40, 20))
+        self.arduino_port_label.setGeometry(QRect(20, 60, 40, 20))
 
         self.arduino_port_combo = QComboBox(self.arduino_group)
-        self.arduino_port_combo.setGeometry(QRect(50, 45, 120, 22))
-        self.arduino_port_combo.currentIndexChanged.connect(self.update_arduino_port)
+        self.arduino_port_combo.setGeometry(QRect(60, 60, 230, 22))
 
-        # Add status indicator
-        self.arduino_status_label = QLabel("Status: Disconnected", self.arduino_group)
-        self.arduino_status_label.setGeometry(QRect(10, 70, 160, 16))
-        self.arduino_status_label.setStyleSheet("QLabel {color: red;}")
-
-        # Refresh button for port list
+        # Refresh button
         self.arduino_refresh_button = QPushButton("⟳", self.arduino_group)
-        self.arduino_refresh_button.setGeometry(QRect(150, 20, 20, 20))
+        self.arduino_refresh_button.setGeometry(QRect(300, 60, 30, 22))
         self.arduino_refresh_button.setToolTip("Refresh port list")
         self.arduino_refresh_button.clicked.connect(self.populate_arduino_ports)
 
-        # Info label for Arduino functionality
-        self.arduino_info = QLabel(
-            "Connect Arduino to control LEDs via serial", self.arduino_group
-        )
-        self.arduino_info.setGeometry(QRect(10, 95, 160, 30))
-        self.arduino_info.setWordWrap(True)
-        self.arduino_info.setStyleSheet("QLabel {font-size: 8pt;}")
+        # Status indicator
+        self.arduino_status = QLabel("Status: Disconnected", self.arduino_group)
+        self.arduino_status.setGeometry(QRect(20, 90, 340, 20))
+        self.arduino_status.setStyleSheet("QLabel {color: red;}")
 
-        # Create the serial listener
+        # Create serial listener and populate ports
         self.serial_listener = ArduinoSerialListener()
-        self.populate_arduino_ports()  # Populate ports at startup
+        self.populate_arduino_ports()
 
-    def setElemetsActiveStatus(self, status):
-        self.micDevices_combobox.setEnabled(status)
-        self.bass_button.setEnabled(status)
-        self.middle_button.setEnabled(status)
-        self.high_button.setEnabled(status)
-        self.localMic.setEnabled(status)
-        self.deviceMic.setEnabled(status)
-        self.modeList.setEnabled(status)
-        self.send_button.setEnabled(status)
-        self.horizontalSlider.setEnabled(status)
+        # Initial state
+        self.devices = []
+        self.setControlsEnabled(False)
 
-    def selectMode(self, item):
-        global isModeUsed, idx
-        isModeUsed = True
-        idx = self.modeList.indexFromItem(item).row()
-        if idx <= 21: 
-            self.handle_mode(idx)
-        elif idx >= 22:
-            if idx == 22:
-                self.handle_musicmode()
-
-    @cached_property
-    def devices(self):
-        return list()
+    def setControlsEnabled(self, enabled):
+        """Enable or disable LED control buttons"""
+        self.powerOn_button.setEnabled(enabled)
+        self.powerOff_button.setEnabled(enabled)
 
     @property
     def current_client(self):
         return Utils.client
 
     @qasync.asyncSlot()
-    async def build_client(self, device):
-        if Utils.client is not None:
-            await Utils.client.stop()
-        Utils.client = BLEClass.QBleakClient(device)
-        Utils.client.messageChanged.connect(self.handle_message_changed)
-        await Utils.client.start()
+    async def handle_scan(self):
+        """Scan for BLE devices"""
+        self.devices.clear()
+        self.devices_combobox.clear()
 
-        self.arduino_listener = ArduinoSerialListener()
-        if self.arduino_listener.connect():
-            await self.arduino_listener.start_listening(Utils.client)
+        # Show scanning animation
+        self.scan_progress.show()
+        self.movie.start()
 
-    @qasync.asyncSlot()
-    async def destroy_client(self):
-        if Utils.client is not None:
-            await Utils.client.stop()
-            self.connect_button.disconnect()
-            self.connect_button.clicked.connect(self.handle_connect)
-            self.setElemetsActiveStatus(False)
-            self.scan_button.setEnabled(True)
-            self.label1.setText("Disconnected")
-            self.connect_button.setText("Connect")
-            self.label1.setStyleSheet("QLabel {color: red; }");
-            self.arduino_listener.stop_listening()
-            self.arduino_listener.disconnect()
+        # Perform scan
+        devices = await BLEClass.BleakScanner.discover(timeout=8.0)
+        self.devices = devices
+
+        # Populate dropdown
+        for i, device in enumerate(self.devices):
+            if str(device.name).startswith("QHM"):
+                print(f"Found Device {device.name}")
+                self.devices_combobox.insertItem(i, device.name, device)
+
+        # Hide animation when done
+        self.movie.stop()
+        self.scan_progress.hide()
 
     @qasync.asyncSlot()
     async def handle_connect(self):
-        # self.log_edit.appendPlainText("try connect")
-        s_Address = self.device_address.text()
+        """Connect to the selected BLE device"""
+        # Get device from address field or dropdown
         if self.device_address.text() != "":
-            device = await BLEClass.BleakScanner.find_device_by_address(self.device_address.text())
+            device = await BLEClass.BleakScanner.find_device_by_address(
+                self.device_address.text()
+            )
         else:
             device = self.devices_combobox.currentData()
 
+        # Connect if we have a valid device
         if isinstance(device, BLEClass.BLEDevice):
-            await self.build_client(device)
-            self.label1.setText("Connected")
-            self.scan_button.setEnabled(False)
-            # self.connect_button.setEnabled(False)
-            info = Utils.p.get_host_api_info_by_index(0)
-            numdevices = info.get('deviceCount')
-            for i in range(0, numdevices):
-                if (Utils.p.get_device_info_by_host_api_device_index(0, i).get('maxInputChannels')) > 0:
-                    tmp_device = Utils.p.get_device_info_by_host_api_device_index(0, i)
-                    Utils.InputDevices[i] = tmp_device
-                    dev_name = tmp_device["name"]
-                    self.micDevices_combobox.addItem(dev_name)
-            self.label1.setStyleSheet("QLabel {color: green; }");
-            self.setElemetsActiveStatus(True)
-            self.connect_button.disconnect()
-            self.connect_button.clicked.connect(self.destroy_client)
+            if Utils.client is not None:
+                await Utils.client.stop()
+
+            Utils.client = BLEClass.QBleakClient(device)
+            await Utils.client.start()
+
+            # Update UI
+            self.connection_status.setText("Connected")
+            self.connection_status.setStyleSheet("QLabel {color: green;}")
+            self.setControlsEnabled(True)
             self.connect_button.setText("Disconnect")
+            self.connect_button.clicked.disconnect()
+            self.connect_button.clicked.connect(self.handle_disconnect)
 
     @qasync.asyncSlot()
-    async def handle_scan(self):
-        # self.log_edit.appendPlainText("Started scanner")
-        self.devices.clear()
-        self.label.show()
-        self.movie.start()
-        devices = await BLEClass.BleakScanner.discover(timeout=8.0)
-        self.devices.extend(devices)
-        self.devices_combobox.clear()
-        for i, device in enumerate(self.devices):
-            if str(device.name).startswith("QHM"):
-                Utils.printLog(("Found Device {}".format(device.name)))
-                self.devices_combobox.insertItem(i, device.name, device)
-        # self.log_edit.appendPlainText("Finish scanner")
-        self.movie.stop() 
-        self.label.hide()
+    async def handle_disconnect(self):
+        """Disconnect from the BLE device"""
+        if Utils.client is not None:
+            await Utils.client.stop()
+            Utils.client = None
 
-    def changeSpeed(self, value):
-        global isModeUsed
-        Utils.Speed = value
-        if isModeUsed:
-            self.handle_mode(self.modeList.currentIndex().row())
-
-    def changePowerToOn(self):
-        self.handle_powerOn()
-
-    def changePowerToOff(self):
-        self.handle_powerOff()
-
-    @qasync.asyncSlot()
-    async def handle_powerOff(self):
-        await self.current_client.writePower("Off")
+            # Update UI
+            self.connection_status.setText("Disconnected")
+            self.connection_status.setStyleSheet("QLabel {color: red;}")
+            self.setControlsEnabled(False)
+            self.connect_button.setText("Connect")
+            self.connect_button.clicked.disconnect()
+            self.connect_button.clicked.connect(self.handle_connect)
 
     @qasync.asyncSlot()
     async def handle_powerOn(self):
-        await self.current_client.writePower("On")
+        """Turn LED power on"""
+        if self.current_client:
+            await self.current_client.writePower("On")
+            print("LED power turned ON")
 
     @qasync.asyncSlot()
-    async def handle_enabledisable(self, what):
-
-        if what == "B":
-            Utils.BlueMic = not Utils.BlueMic                  
-        if what == "M":
-            Utils.RedMic = not Utils.RedMic
-        if what == "H":
-            Utils.GreenMic = not Utils.GreenMic
-
-        self.handle_rewrite()
-
-    @qasync.asyncSlot()
-    async def handle_rewrite(self):
-        await self.current_client.writeColor()
-
-    def handle_message_changed(self, message):
-        pass
-        # self.log_edit.appendPlainText(f"msg: {message.decode()}")
-
-    @qasync.asyncSlot()
-    async def handle_send(self):
-
-        Utils.isModeUsed = False
-        self.res = QColorDialog.getColor()
-        try:
-            await self.current_client.writeColor(self.res.red(), self.res.green(), self.res.blue())
-        except Exception as ex:
-            Utils.printLog("Colors error {}".format(ex))
-
-    @qasync.asyncSlot()
-    async def handle_mode(self, idx):
-        await self.current_client.writeMode(idx)
-
-    def updateMicDevice(self, index):
-        Utils.selectedInputDevice = index
-
-    @qasync.asyncSlot()
-    async def handle_musicmode(self):
-        global isModeUsed, idx
-
-        if isModeUsed and idx == 22:
-            if self.deviceMic.isChecked():
-                Utils.localAudio = False
-                await self.current_client.writeMicState(True)
-            elif self.localMic.isChecked():
-                await self.current_client.writeMicState(False)
-                Utils.localAudio = True 
-                await ExternalAudio.start_stream()
-
-    async def captureImage(self):
-        # NUM_CLUSTERS = 5
-        while Utils.captureMode:
-            def bincount_app(a):
-                try:
-                    a2D = a.reshape(-1,a.shape[-1])
-                    col_range = (256, 256, 256) # generically : a2D.max(0)+1
-                    a1D = np.ravel_multi_index(a2D.T, col_range)
-                    return np.unravel_index(np.bincount(a1D).argmax(), col_range)
-                except Exception as err:
-                    Utils.printLog(err)
-
-            # print('reading image')
-            im = ImageGrab.grab()
-            # im = Image.open('image.jpg')
-            im = im.resize((150, 150))      # optional, to reduce time
-            im = np.array(im)
-
-            colour = bincount_app(im)
-            Utils.printLog(colour)
-            await self.current_client.writeColor(colour[0], colour[1], colour[2])
-
-    @qasync.asyncSlot()
-    async def handle_startcapture(self): 
-        if self.startCapture.checkState() == Qt.Checked:
-            Utils.captureMode = True
-            loop = asyncio.get_running_loop()
-            loop.run_in_executor(None, lambda: asyncio.run(self.captureImage()))
-        else:
-            Utils.captureMode = False
+    async def handle_powerOff(self):
+        """Turn LED power off"""
+        if self.current_client:
+            await self.current_client.writePower("Off")
+            print("LED power turned OFF")
 
     def populate_arduino_ports(self):
         """Get available serial ports and populate the combo box"""
@@ -451,120 +205,71 @@ class MainWindow(QMainWindow):
         import serial.tools.list_ports
 
         ports = serial.tools.list_ports.comports()
-
         for i, port in enumerate(ports):
             self.arduino_port_combo.addItem(
                 f"{port.device} - {port.description}", port.device
             )
 
-        # Select the current port if it exists in the list
+        # Select current port if exists
         if hasattr(self.serial_listener, "port") and self.serial_listener.port:
             for i in range(self.arduino_port_combo.count()):
                 if self.arduino_port_combo.itemData(i) == self.serial_listener.port:
                     self.arduino_port_combo.setCurrentIndex(i)
                     break
 
-    def update_arduino_port(self, index):
-        """Update the port used by the Arduino listener"""
-        if index >= 0:
-            port = self.arduino_port_combo.itemData(index)
-
-            # If we're already connected, disconnect and reconnect with the new port
-            was_connected = False
-            if (
-                hasattr(self.serial_listener, "is_connected")
-                and self.serial_listener.is_connected
-            ):
-                was_connected = True
-                self.serial_listener.disconnect()
-
-            # Update the port in the serial listener
-            self.serial_listener.port = port
-
-            # Reconnect if we were connected before
-            if was_connected and self.arduino_enabled.isChecked():
-                if self.serial_listener.connect():
-                    self.update_arduino_status(True)
-                    if hasattr(self, "current_client") and self.current_client:
-                        loop = asyncio.get_running_loop()
-                        self.arduino_task = loop.create_task(
-                            self.serial_listener.start_listening(self.current_client)
-                        )
-
     def update_arduino_status(self, connected):
         """Update the Arduino connection status display"""
         if connected:
-            self.arduino_status_label.setText(
-                f"Status: Connected ({self.serial_listener.port})"
+            self.arduino_status.setText(
+                f"Status: Connected ({self.serial_listener.port}) - Ready to receive on/off commands"
             )
-            self.arduino_status_label.setStyleSheet("QLabel {color: green;}")
+            self.arduino_status.setStyleSheet("QLabel {color: green;}")
         else:
-            self.arduino_status_label.setText("Status: Disconnected")
-            self.arduino_status_label.setStyleSheet("QLabel {color: red;}")
+            self.arduino_status.setText("Status: Disconnected")
+            self.arduino_status.setStyleSheet("QLabel {color: red;}")
 
     @qasync.asyncSlot()
     async def toggle_arduino_listener(self):
-        """Toggle the Arduino serial listener on/off"""
+        """Toggle Arduino serial connection on/off"""
         if self.arduino_enabled.isChecked():
-            print("Starting Arduino listener")
-
-            # Get selected port if any
+            # Get selected port
             if self.arduino_port_combo.currentIndex() >= 0:
                 port = self.arduino_port_combo.itemData(
                     self.arduino_port_combo.currentIndex()
                 )
                 self.serial_listener.port = port
 
-            print(f"Connecting to Arduino on port {self.serial_listener.port}")
             # Try to connect
             if self.serial_listener.connect():
                 self.update_arduino_status(True)
 
-                # Check if we're connected to BLE client for LED control
-                if hasattr(self, "current_client") and self.current_client:
-                    try:
-                        # Run the listener in a separate task with proper error handling
-                        loop = asyncio.get_running_loop()
-                        self.arduino_task = asyncio.create_task(
-                            self.serial_listener.start_listening(self.current_client)
-                        )
-                        # Add error handling to the task
-                        self.arduino_task.add_done_callback(
-                            self.handle_arduino_task_result
-                        )
-                        print("Arduino listener started with BLE forwarding")
-                    except Exception as e:
-                        print(f"Error starting Arduino listener: {e}")
-                        self.arduino_enabled.setChecked(False)
+                # Start listening in test mode or with BLE client
+                if self.current_client:
+                    print("Starting Arduino listener with BLE connection")
+                    self.arduino_task = asyncio.create_task(
+                        self.serial_listener.start_listening(self.current_client)
+                    )
                 else:
-                    # Run in test mode without BLE forwarding
-                    try:
-                        loop = asyncio.get_running_loop()
-                        self.arduino_task = asyncio.create_task(
-                            self.serial_listener.start_listening_test_mode()
-                        )
-                        # Add error handling to the task
-                        self.arduino_task.add_done_callback(
-                            self.handle_arduino_task_result
-                        )
-                        print(
-                            "Arduino listener started in test mode (no BLE forwarding)"
-                        )
-                    except Exception as e:
-                        print(f"Error starting Arduino test listener: {e}")
-                        self.arduino_enabled.setChecked(False)
+                    print("Starting Arduino listener in test mode")
+                    self.arduino_task = asyncio.create_task(
+                        self.serial_listener.start_listening_test_mode()
+                    )
+
+                # Add error handler
+                self.arduino_task.add_done_callback(self.handle_arduino_task_result)
             else:
                 self.arduino_enabled.setChecked(False)
-                Utils.printLog(
+                print(
                     f"Failed to connect to Arduino on port {self.serial_listener.port}"
                 )
-                print("Arduino listener failed to start")
         else:
-            # First stop listening, then disconnect
+            # Stop listening and disconnect
             self.serial_listener.stop_listening()
-            await asyncio.sleep(0.5)  # Give it a moment to stop
+            await asyncio.sleep(0.1)
             self.serial_listener.disconnect()
             self.update_arduino_status(False)
+
+            # Cancel task if it exists
             if hasattr(self, "arduino_task") and self.arduino_task:
                 self.arduino_task.cancel()
 
@@ -587,17 +292,17 @@ def main():
         user32.SetProcessDPIAware()
     except:
         pass
+
     Utils.app = QApplication(sys.argv)
-    #Utils.app.aboutToQuit.connect(myExitHandler)
     loop = qasync.QEventLoop(Utils.app)
     asyncio.set_event_loop(loop)
+
     w = MainWindow()
     w.show()
+
     with loop:
         loop.run_forever()
 
-def test():
-    pass
 
 if __name__ == "__main__":
     main()
