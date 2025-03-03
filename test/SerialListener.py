@@ -96,9 +96,9 @@ class ArduinoSerialListener:
                                 await ble_client.writeMode(mode_idx)
                             except Exception as e:
                                 print(f"Error processing mode command: {e}")
-                        elif line == "POWER:ON":
+                        elif line == "TURN_ON":
                             await ble_client.writePower("On")
-                        elif line == "POWER:OFF":
+                        elif line == "TURN_OFF":
                             await ble_client.writePower("Off")
 
                 # Avoid tight loop
