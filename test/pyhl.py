@@ -50,7 +50,8 @@ class MainWindow(QMainWindow):
     def __init__(self):
         global isModeUsed, idx
         super().__init__()
-        self.setFixedSize(400, 300)
+        # Increase window height to fit everything
+        self.setFixedSize(400, 450)  # Increased height to 450
         isModeUsed = False
         idx = -1
         self.setWindowTitle("HappyLigthing-py")
@@ -202,15 +203,46 @@ class MainWindow(QMainWindow):
         self.setElemetsActiveStatus(False)
 
         # Add Arduino listener components
+        # Update Arduino control group - position it better
         self.arduino_group = QGroupBox("Arduino Serial Control", self)
-        self.arduino_group.setGeometry(QRect(10, 260, 190, 30))
+        self.arduino_group.setGeometry(
+            QRect(210, 300, 180, 130)
+        )  # Moved to the right side
 
         self.arduino_enabled = QCheckBox("Enable Arduino", self.arduino_group)
-        self.arduino_enabled.setGeometry(QRect(10, 5, 120, 20))
+        self.arduino_enabled.setGeometry(QRect(10, 20, 120, 20))
         self.arduino_enabled.stateChanged.connect(self.toggle_arduino_listener)
+
+        # Add port selection dropdown
+        self.arduino_port_label = QLabel("Port:", self.arduino_group)
+        self.arduino_port_label.setGeometry(QRect(10, 45, 40, 20))
+
+        self.arduino_port_combo = QComboBox(self.arduino_group)
+        self.arduino_port_combo.setGeometry(QRect(50, 45, 120, 22))
+        self.arduino_port_combo.currentIndexChanged.connect(self.update_arduino_port)
+
+        # Add status indicator
+        self.arduino_status_label = QLabel("Status: Disconnected", self.arduino_group)
+        self.arduino_status_label.setGeometry(QRect(10, 70, 160, 16))
+        self.arduino_status_label.setStyleSheet("QLabel {color: red;}")
+
+        # Refresh button for port list
+        self.arduino_refresh_button = QPushButton("⟳", self.arduino_group)
+        self.arduino_refresh_button.setGeometry(QRect(150, 20, 20, 20))
+        self.arduino_refresh_button.setToolTip("Refresh port list")
+        self.arduino_refresh_button.clicked.connect(self.populate_arduino_ports)
+
+        # Info label for Arduino functionality
+        self.arduino_info = QLabel(
+            "Connect Arduino to control LEDs via serial", self.arduino_group
+        )
+        self.arduino_info.setGeometry(QRect(10, 95, 160, 30))
+        self.arduino_info.setWordWrap(True)
+        self.arduino_info.setStyleSheet("QLabel {font-size: 8pt;}")
 
         # Create the serial listener
         self.serial_listener = ArduinoSerialListener()
+        self.populate_arduino_ports()  # Populate ports at startup
 
     def setElemetsActiveStatus(self, status):
         self.micDevices_combobox.setEnabled(status)
@@ -413,29 +445,110 @@ class MainWindow(QMainWindow):
         else:
             Utils.captureMode = False
 
+    def populate_arduino_ports(self):
+        """Get available serial ports and populate the combo box"""
+        self.arduino_port_combo.clear()
+        import serial.tools.list_ports
+
+        ports = serial.tools.list_ports.comports()
+
+        for i, port in enumerate(ports):
+            self.arduino_port_combo.addItem(
+                f"{port.device} - {port.description}", port.device
+            )
+
+        # Select the current port if it exists in the list
+        if hasattr(self.serial_listener, "port") and self.serial_listener.port:
+            for i in range(self.arduino_port_combo.count()):
+                if self.arduino_port_combo.itemData(i) == self.serial_listener.port:
+                    self.arduino_port_combo.setCurrentIndex(i)
+                    break
+
+    def update_arduino_port(self, index):
+        """Update the port used by the Arduino listener"""
+        if index >= 0:
+            port = self.arduino_port_combo.itemData(index)
+
+            # If we're already connected, disconnect and reconnect with the new port
+            was_connected = False
+            if (
+                hasattr(self.serial_listener, "is_connected")
+                and self.serial_listener.is_connected
+            ):
+                was_connected = True
+                self.serial_listener.disconnect()
+
+            # Update the port in the serial listener
+            self.serial_listener.port = port
+
+            # Reconnect if we were connected before
+            if was_connected and self.arduino_enabled.isChecked():
+                if self.serial_listener.connect():
+                    self.update_arduino_status(True)
+                    if hasattr(self, "current_client") and self.current_client:
+                        loop = asyncio.get_running_loop()
+                        self.arduino_task = loop.create_task(
+                            self.serial_listener.start_listening(self.current_client)
+                        )
+
+    def update_arduino_status(self, connected):
+        """Update the Arduino connection status display"""
+        if connected:
+            self.arduino_status_label.setText(
+                f"Status: Connected ({self.serial_listener.port})"
+            )
+            self.arduino_status_label.setStyleSheet("QLabel {color: green;}")
+        else:
+            self.arduino_status_label.setText("Status: Disconnected")
+            self.arduino_status_label.setStyleSheet("QLabel {color: red;}")
+
     @qasync.asyncSlot()
     async def toggle_arduino_listener(self):
         """Toggle the Arduino serial listener on/off"""
         if self.arduino_enabled.isChecked():
-            if not self.current_client:
+            print("Starting Arduino listener")
+            # Check if we're connected to the BLE device
+            if not hasattr(self, "current_client") or not self.current_client:
+                print("Cannot start Arduino listener: Not connected to BLE device")
                 Utils.printLog(
                     "Cannot start Arduino listener: Not connected to LED device"
                 )
+
                 self.arduino_enabled.setChecked(False)
                 return
 
-            if self.serial_listener.connect():
+            # Get selected port if any
+            if self.arduino_port_combo.currentIndex() >= 0:
+                port = self.arduino_port_combo.itemData(
+                    self.arduino_port_combo.currentIndex()
+                )
+                self.serial_listener.port = port
+
+            print(f"Connecting to Arduino on port {self.serial_listener.port}")
+            # Try to connect
+            connect = await self.connect_arduino()
+            if connect:
+                self.update_arduino_status(True)
                 loop = asyncio.get_running_loop()
                 # Run the listener in a separate task
                 self.arduino_task = loop.create_task(
                     self.serial_listener.start_listening(self.current_client)
                 )
+                print("Arduino listener started")
+            else:
+                self.arduino_enabled.setChecked(False)
+                Utils.printLog(
+                    f"Failed to connect to Arduino on port {self.serial_listener.port}"
+                )
+                print("Arduino listener failed to start")
         else:
+            # First stop listening, then disconnect
             self.serial_listener.stop_listening()
+            await asyncio.sleep(0.5)  # Give it a moment to stop
             self.serial_listener.disconnect()
+            self.update_arduino_status(False)
             if hasattr(self, "arduino_task") and self.arduino_task:
                 self.arduino_task.cancel()
-
 
 def main():
     try:
@@ -457,4 +570,3 @@ def test():
 
 if __name__ == "__main__":
     main()
-

@@ -1,45 +1,113 @@
-import asyncio
 import serial
+import asyncio
+import threading
+import time
 import Utils
 
-
 class ArduinoSerialListener:
-    def __init__(self, serial_port="COM3", baud_rate=9600):
-        self.serial_port = serial_port
-        self.baud_rate = baud_rate
-        self.ser = None
-        self.is_listening = False
 
-    def connect(self):
+    def __init__(self):
+        self.port = None
+        self.baudrate = 9600
+        self.serial = None
+        self.is_connected = False
+        self.is_listening = False
+        self._stop_event = threading.Event()
+
+    def connect(self, port=None):
+        """Connect to the Arduino via serial port"""
+        if port:
+            self.port = port
+
+        if not self.port:
+            # Try to auto-detect a port if none specified
+            import serial.tools.list_ports
+
+            ports = list(serial.tools.list_ports.comports())
+            if ports:
+                self.port = ports[0].device
+            else:
+                print("No serial ports found")
+                return False
+
         try:
-            self.ser = serial.Serial(self.serial_port, self.baud_rate, timeout=0.1)
-            Utils.printLog(f"Connected to Arduino on {self.serial_port}")
+            # Close previous connection if exists
+            if self.serial and self.serial.is_open:
+                self.serial.close()
+
+            self.serial = serial.Serial(self.port, self.baudrate, timeout=1)
+            self.is_connected = True
+            print(f"Connected to Arduino on {self.port}")
+
+            # Update status (for example, printing the connection status)
+            print("Status: Connected")
+
             return True
         except Exception as e:
-            Utils.printLog(f"Failed to connect to Arduino: {e}")
+            print(f"Failed to connect to Arduino: {e}")
+            self.is_connected = False
+            # Update status to disconnected in case of an error
+            print("Status: Disconnected")
             return False
 
     def disconnect(self):
-        if self.ser and self.ser.is_open:
-            self.ser.close()
-            Utils.printLog("Disconnected from Arduino")
+        """Disconnect from the Arduino"""
+        try:
+            if hasattr(self, "serial") and self.serial and self.serial.is_open:
+                self.serial.close()
+            self.is_connected = False
+            print("Disconnected from Arduino")
+            return True
+        except Exception as e:
+            print(f"Error disconnecting from Arduino: {e}")
+            return False
 
-    async def start_listening(self, client):
-        """Start listening for Arduino commands"""
+    async def start_listening(self, ble_client):
+        """Start listening for Arduino commands and forward them to BLE"""
+        if not self.is_connected or not self.serial:
+            print("Cannot start listening: Not connected to Arduino")
+            return False
+
         self.is_listening = True
-        Utils.printLog("Starting Arduino serial listener...")
+        self._stop_event.clear()
+        print("Started listening for Arduino commands")
 
-        while self.is_listening:
-            if self.ser and self.ser.is_open:
-                try:
-                    if self.ser.in_waiting > 0:
-                        message = self.ser.readline().decode("utf-8").strip()
-                        if message:
-                            Utils.printLog(f"Arduino sent: {message}")
-                            await self.process_command(message, client)
-                except Exception as e:
-                    Utils.printLog(f"Error reading from serial port: {e}")
-            await asyncio.sleep(0.1)
+        try:
+            while not self._stop_event.is_set():
+                if self.serial.in_waiting > 0:
+                    line = self.serial.readline().decode("utf-8").strip()
+                    if line:
+                        print(f"Arduino sent: {line}")
+                        # Process commands from Arduino
+                        if line.startswith("COLOR:"):
+                            try:
+                                # Format: COLOR:R,G,B
+                                rgb = line[6:].split(",")
+                                if len(rgb) == 3:
+                                    r, g, b = map(int, rgb)
+                                    await ble_client.writeColor(r, g, b)
+                            except Exception as e:
+                                print(f"Error processing color command: {e}")
+                        elif line.startswith("MODE:"):
+                            try:
+                                # Format: MODE:index
+                                mode_idx = int(line[5:])
+                                await ble_client.writeMode(mode_idx)
+                            except Exception as e:
+                                print(f"Error processing mode command: {e}")
+                        elif line == "POWER:ON":
+                            await ble_client.writePower("On")
+                        elif line == "POWER:OFF":
+                            await ble_client.writePower("Off")
+
+                # Avoid tight loop
+                await asyncio.sleep(0.1)
+
+        except Exception as e:
+            print(f"Error in Arduino listener: {e}")
+            self.is_listening = False
+
+        return True
 
     def stop_listening(self):
         """Stop the serial listener"""
